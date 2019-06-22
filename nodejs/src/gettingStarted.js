@@ -1,0 +1,649 @@
+// "use strict";
+
+// Node server configuration
+
+const express = require('express');
+const app=express();
+const HOST = "0.0.0.0";
+const PORT =8080;
+var bodyParser = require("body-parser");
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+var cors = require('cors');
+app.use(cors());
+// app.use(cors({
+//     origin: 'http://localhost:3000/api/v1/*'
+//   }));
+app.all('/*', function(req, res, next) {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Headers", "X-Requested-With");
+    next();
+  });
+
+// Mongo connection
+
+var MongoClient = require("mongodb").MongoClient;
+var url = "mongodb://localhost:27017/";
+
+
+app.listen(PORT,HOST);
+console.log(`Running on ${PORT}`);
+
+
+// Indy configuration
+const indy = require('indy-sdk');
+const util = require('./util');
+const assert = require('assert');
+
+
+// Login verification
+
+app.post("/api/v1/login", function(req, response) {
+    console.log("api registration");
+    console.log(req.body);
+    MongoClient.connect(
+      url,
+      function(err, db) {
+        if (err) throw err;
+        var dbo = db.db("sovrinDB");
+        // var myobj = { name: "Company Inc", address: "Highway 37"  };
+  
+        var query = { _id: req.body._id };
+        dbo
+          .collection("registration")
+          .find(query)
+          .toArray(function(err, result) {
+            if (err) throw err;
+            console.log(result.length);
+            if (result.length == 0) {
+              response.send({
+                  status:401,
+                response: "Fail"
+              });
+            } else {
+              console.log(result[0]);
+              if (result[0].pwd == req.body.pwd) {
+                // console.log("inside if");
+                response.send({
+                    statusCode:200,
+                  _id: result[0]._id,
+                  name:result[0].name,
+                  dept:result[0].Dept
+                });
+              } else {
+                console.log("pass not match");
+                response.send({
+                    status:401,
+                  response: "Fail"
+                });
+              }
+            }
+  
+            db.close();
+          });
+      }
+    );
+  });
+
+// curl -d '{"_id":1001, "pwd":"Notary"}' -H "Content-Type: application/json" -X POST http://localhost:8080/api/v1/login
+
+
+// bootstrapping indy network with onboarding, schema creaton and schema credential
+
+// Global variable
+let stewardDid, notaryDid, universityDid,stewardKey,transcriptSchemaId, transcriptSchema,enrollementCertificateSchemaId, enrollementCertificateSchema,poolHandle,notaryEnrollementCredDefId, notaryEnrollementCredDefJson, universityTranscriptCredDefId, universityTranscriptCredDefJson;
+
+// ----------------------------> Bootstrapping reuired credentials <------------------------------
+// curl -X GET http://localhost:8080/api/v1/bootstrapping
+ app.get("/api/v1/bootstrapping", function(req, response) {
+
+console.log('inside api/v1/bootstrapping');
+    run();
+    async function run() {
+
+        console.log("gettingStarted.js -> started");
+    
+        let poolName = 'pool1';
+        console.log(`Open Pool Ledger: ${poolName}`);
+        let poolGenesisTxnPath = await util.getPoolGenesisTxnPath(poolName);
+        let poolConfig = {
+            "genesis_txn": poolGenesisTxnPath
+        };
+        try {
+            await indy.createPoolLedgerConfig(poolName, poolConfig);
+        } catch(e) {
+            if(e.message !== "PoolLedgerConfigAlreadyExistsError") {
+                throw e;
+            }
+        }
+    
+        await indy.setProtocolVersion(2)
+    
+         poolHandle = await indy.openPoolLedger(poolName);
+    
+        console.log("==============================");
+        console.log("=== Getting Trust Anchor credentials for Notary, University and College  ==");
+        console.log("------------------------------");
+    
+        console.log("\"Sovrin Steward\" -> Create wallet");
+        let stewardWalletConfig = {'id': 'stewardWalletName'}
+       let  stewardWalletCredentials = {'key': 'steward_key'}
+        try {
+            await indy.createWallet(stewardWalletConfig, stewardWalletCredentials)
+        } catch(e) {
+            if(e.message !== "WalletAlreadyExistsError") {
+                throw e;
+            }
+        }
+    
+       let stewardWallet = await indy.openWallet(stewardWalletConfig, stewardWalletCredentials);
+    
+        console.log("\"Sovrin Steward\" -> Create and store in Wallet DID from seed");
+        let stewardDidInfo = {
+            'seed': '000000000000000000000000Steward1'
+        };
+    
+         [stewardDid, stewardKey] = await indy.createAndStoreMyDid(stewardWallet, stewardDidInfo);
+    
+        console.log("==============================");
+        console.log("== Getting Trust Anchor credentials - Notary Onboarding  ==");
+        console.log("------------------------------");
+    
+        let notaryWalletConfig = {'id': 'notaryWallet'}
+        let notaryWalletCredentials = {'key': 'notary_key'}
+        let [notaryWallet, stewardnotaryKey, notaryStewardDid, notaryStewardKey] = await onboarding(poolHandle, "Sovrin Steward", stewardWallet, stewardDid, "notary", null, notaryWalletConfig, notaryWalletCredentials);
+    
+        console.log("==============================");
+        console.log("== Getting Trust Anchor credentials - notary getting Verinym  ==");
+        console.log("------------------------------");
+    
+         notaryDid = await getVerinym(poolHandle, "Sovrin Steward", stewardWallet, stewardDid, stewardnotaryKey, "notary", notaryWallet, notaryStewardDid,
+            notaryStewardKey, 'TRUST_ANCHOR');
+            console.log('---------notary did', notaryDid);
+    
+        console.log("==============================");
+        console.log("== Getting Trust Anchor credentials - University Onboarding  ==");
+        console.log("------------------------------");
+    
+        let universityWalletConfig = {'id': 'universityWallet'}
+        let universityWalletCredentials = {'key': 'university_key'}
+    let     [universityWallet, stewarduniversityKey, universityStewardDid, universityStewardKey] = await onboarding(poolHandle, "Sovrin Steward", stewardWallet, stewardDid, "university", null, universityWalletConfig, universityWalletCredentials);
+    
+        console.log("==============================");
+        console.log("== Getting Trust Anchor credentials - university getting Verinym  ==");
+        console.log("------------------------------");
+    
+        universityDid = await getVerinym(poolHandle, "Sovrin Steward", stewardWallet, stewardDid, stewarduniversityKey,
+            "university", universityWallet, universityStewardDid, universityStewardKey, 'TRUST_ANCHOR');
+
+            console.log('---------university did', universityDid);
+    
+    //     console.log("==============================");
+    //     console.log("== Getting Trust Anchor credentials - College Onboarding  ==");
+    //     console.log("------------------------------");
+    
+    //     let collegeWalletConfig = {'id': 'collegeWallet'}
+    //     let collegeWalletCredentials = {'key': 'college_key'}
+    //  let   [collegeWallet, stewardcollegeKey, collegeStewardDid, collegeStewardKey] = await onboarding(poolHandle, "Sovrin Steward", stewardWallet, stewardDid, "college", null, collegeWalletConfig, collegeWalletCredentials);
+    
+    //     console.log("==============================");
+    //     console.log("== Getting Trust Anchor credentials - college getting Verinym  ==");
+    //     console.log("------------------------------");
+    
+    //      collegeDid = await getVerinym(poolHandle, "Sovrin Steward", stewardWallet, stewardDid, stewardcollegeKey,
+    //         "college", collegeWallet, collegeStewardDid, collegeStewardKey, 'TRUST_ANCHOR');
+
+    //         console.log('---------------college did---------', collegeDid)
+
+    //         // Onboarding Happened. Schema Setup
+
+            console.log("==============================");
+    console.log("=== Credential Schemas Setup ==");
+    console.log("------------------------------");
+
+    console.log("\"notary\" -> Create \"enrollement-Certificate\" Schema");
+     [enrollementCertificateSchemaId, enrollementCertificateSchema] = await indy.issuerCreateSchema(notaryDid, 'enrollement-Certificate', '0.2',
+        ['uid', 'university_name', 'est_year', 'requestor_id',
+            'grant_status','rating']);
+
+    console.log("\"notary\" -> Send \"enrollement-Certificate\" Schema to Ledger");
+    await sendSchema(poolHandle, notaryWallet, notaryDid, enrollementCertificateSchema);
+
+    console.log("\"notary\" -> Create \"Transcript\" Schema");
+     [transcriptSchemaId, transcriptSchema] = await indy.issuerCreateSchema(notaryDid, 'Transcript', '1.2', ['first_name', 'last_name', 'degree', 'status',
+            'year', 'average', 'uid', 'university_name', 'grant_status' ]);
+    console.log("\"notary\" -> Send \"Transcript\" Schema to Ledger");
+    await sendSchema(poolHandle, notaryWallet, notaryDid, transcriptSchema);
+
+    console.log("==============================");
+    console.log("=== Notary Credential Definition Setup ==");
+    console.log("------------------------------");
+
+    console.log("\"notary\" -> Get \"Transcript\" Schema from Ledger");
+    [, enrollementCertificateSchema] = await getSchema(poolHandle, notaryDid, enrollementCertificateSchemaId);
+
+    console.log("\"notary\" -> Create and store in Wallet \"notary Transcript\" Credential Definition");
+     [notaryEnrollementCredDefId, notaryEnrollementCredDefJson] = await indy.issuerCreateAndStoreCredentialDef(notaryWallet, notaryDid, enrollementCertificateSchema, 'TAG1', 'CL', '{"support_revocation": false}');
+
+    console.log("\"notary\" -> Send  \"notary Enrollement\" Credential Definition to Ledger");
+    await sendCredDef(poolHandle, notaryWallet, notaryDid, notaryEnrollementCredDefJson);
+
+
+    console.log("=== university Credential Definition Setup ==");
+    console.log("------------------------------");
+
+    console.log("\"university\" ->  Get from Ledger \"Transcript-Certificate\" Schema");
+    [, transcriptSchema] = await getSchema(poolHandle, universityDid, transcriptSchemaId);
+
+    console.log("\"university\" -> Create and store in Wallet \"university Transcipt-Certificate\" Credential Definition");
+     [universityTranscriptCredDefId, universityTranscriptCredDefJson] = await indy.issuerCreateAndStoreCredentialDef(universityWallet, universityDid, transcriptSchema, 'TAG1', 'CL', '{"support_revocation": false}');
+
+    console.log("\"university\" -> Send \"university Transcript\" Credential Definition to Ledger");
+    await sendCredDef(poolHandle, universityWallet, universityDid, universityTranscriptCredDefJson);
+    await indy.closeWallet(notaryWallet);
+    await indy.closeWallet(universityWallet);
+    response.send({status:200, msg:"onboarding completed"})
+    }
+    
+
+})
+
+
+
+// --------------------------> Enrollement of Universities by Notary<-------------------------------------
+// curl -X GET http://localhost:8080/api/v1/enrollement
+app.get("/api/v1/enrollement", function(req, response) {
+
+    run();
+
+    async function run(){
+        console.log("==============================");
+        console.log("=== Creating Enrollement for University ==");
+        console.log("==============================");
+        
+    
+        let aliceWalletConfig = {'id': 'aliceWallet'}
+        let aliceWalletCredentials = {'key': 'alice_key'}
+
+        // let stewardWallet = await indy.openWallet(stewardWalletConfig, stewardWalletCredentials);
+        let notaryWalletConfig = {'id': 'notaryWallet'}
+        let notaryWalletCredentials = {'key': 'notary_key'}
+       
+        // notary wallet
+        let notaryWallet = await indy.openWallet(notaryWalletConfig, notaryWalletCredentials);
+    
+        let [aliceWallet, notaryAliceKey, alicenotaryDid, alicenotaryKey, notaryAliceConnectionResponse] = await onboarding(poolHandle, "Notary", notaryWallet, notaryDid, "Alice", null, aliceWalletConfig, aliceWalletCredentials);
+    
+        
+    
+        console.log("\"notary\" -> Create \"Enrollement\" Credential Offer for Alice");
+        let notaryEnrollementCredDefJson = await indy.issuerCreateCredentialOffer(notaryWallet, notaryEnrollementCredDefId);
+    
+        console.log("\"notary\" -> Get key for Alice did");
+        let alicenotaryVerkey = await indy.keyForDid(poolHandle, notaryWallet, notaryAliceConnectionResponse['did']);
+    
+        console.log("\"notary\" -> Authcrypt \"Enrollement\" Credential Offer for Alice");
+        let authcryptedEnrollementCredOffer = await indy.cryptoAuthCrypt(notaryWallet, notaryAliceKey, alicenotaryVerkey, Buffer.from(JSON.stringify(notaryEnrollementCredDefJson),'utf8'));
+    
+        console.log("\"notary\" -> Send authcrypted \"Enrollement\" Credential Offer to Alice");
+    
+        console.log("\"Alice\" -> Authdecrypted \"Enrollement\" Credential Offer from notary");
+        let [notaryAliceVerkey, authdecryptednotaryEnrollementCredDefJson, authdecryptedEnrollementCredOffer] = await authDecrypt(aliceWallet, alicenotaryKey, authcryptedEnrollementCredOffer);
+    
+        console.log("\"Alice\" -> Create and store \"Alice\" Master Secret in Wallet");
+        let aliceMasterSecretId = await indy.proverCreateMasterSecret(aliceWallet, null);
+    
+        console.log("\"Alice\" -> Get \"notary Enrollement\" Credential Definition from Ledger");
+        let notaryEnrollementCredDef;
+        [notaryEnrollementCredDefId, notaryEnrollementCredDef] = await getCredDef(poolHandle, alicenotaryDid, authdecryptedEnrollementCredOffer['cred_def_id']);
+    
+        console.log("\"Alice\" -> Create \"Enrollement\" Credential Request for notary");
+        let [enrollementCredRequestjson, enrollementCredRequestMetadataJson] = await indy.proverCreateCredentialReq(aliceWallet, alicenotaryDid, authdecryptednotaryEnrollementCredDefJson, notaryEnrollementCredDef, aliceMasterSecretId);
+    
+        console.log("\"Alice\" -> Authcrypt \"Enrollement\" Credential Request for notary");
+        let authcryptedEnrollementCredRequest = await indy.cryptoAuthCrypt(aliceWallet, alicenotaryKey, notaryAliceVerkey, Buffer.from(JSON.stringify(enrollementCredRequestjson),'utf8'));
+    
+        console.log("\"Alice\" -> Send authcrypted \"Enrollement\" Credential Request to notary");
+    
+        console.log("\"notary\" -> Authdecrypt \"Enrollement\" Credential Request from Alice");
+        let authdecryptedenrollementCredRequestjson;
+        [alicenotaryVerkey, authdecryptedenrollementCredRequestjson] = await authDecrypt(notaryWallet, notaryAliceKey, authcryptedEnrollementCredRequest);
+    
+        console.log("\"notary\" -> Create \"Enrollement\" Credential for Alice");
+        // note that encoding is not standardized by Indy except that 32-bit integers are encoded as themselves. IS-786
+
+        // ['uid', 'university_name', 'est_year', 'requestor_id',
+        // 'grant_status','rating']
+        let EnrollementCredValues = {
+            "uid": {"raw": "Uni123456", "encoded": "1139481716457488690172217916278103335"},
+            "university_name": {"raw": "UniversityX", "encoded": "5321642780241790123587902456789123452"},
+            "requestor_id": {"raw": "1002", "encoded": "12434523576212321"},
+            "grant_status": {"raw": "approved", "encoded": "2213454313412354"},           
+            "est_year": {"raw": "1992", "encoded": "2015"},
+            "rating": {"raw": "4", "encoded": "4"}
+        };
+    
+        let [enrollementCredJson] = await indy.issuerCreateCredential(notaryWallet, notaryEnrollementCredDefJson, authdecryptedenrollementCredRequestjson, EnrollementCredValues, null, -1);
+    
+        console.log("\"notary\" -> Authcrypt \"Enrollement\" Credential for Alice");
+        let authcryptedenrollementCredJson = await indy.cryptoAuthCrypt(notaryWallet, notaryAliceKey, alicenotaryVerkey, Buffer.from(JSON.stringify(enrollementCredJson),'utf8'));
+    
+        console.log("\"notary\" -> Send authcrypted \"Enrollement\" Credential to Alice");
+    
+        console.log("\"Alice\" -> Authdecrypted \"Enrollement\" Credential from notary");
+        let [, authdecryptedenrollementCredJson] = await authDecrypt(aliceWallet, alicenotaryKey, authcryptedenrollementCredJson);
+    
+        console.log("\"Alice\" -> Store \"Enrollement\" Credential from notary");
+        await indy.proverStoreCredential(aliceWallet, null, enrollementCredRequestMetadataJson,
+            authdecryptedenrollementCredJson, notaryEnrollementCredDef, null);
+
+            await indy.closeWallet(notaryWallet);    
+            response.send({status:200, msg:authdecryptedenrollementCredJson});
+    }
+
+})
+
+// -------------------------->Issuance of Transcript by University <----------------------------
+// curl -X GET http://localhost:8080/api/v1/issueDegree
+app.get("/api/v1/issueDegree", function(req, response) {
+
+    run();
+
+    async function run(){
+        console.log("==============================");
+        console.log("=== Issuing Transcript to Students ==");
+        console.log("==============================");
+        
+    
+        let bobWalletConfig = {'id': 'bobWallet'}
+        let bobWalletCredentials = {'key': 'bob_key'}
+
+        
+        let universityWalletConfig = {'id': 'universityWallet'}
+        let universityWalletCredentials = {'key': 'university_key'}
+       
+        // university wallet
+        let universityWallet = await indy.openWallet(universityWalletConfig, universityWalletCredentials);
+    
+        let [bobWallet, universitybobKey, bobuniversityDid, bobuniversityKey, universitybobConnectionResponse] = await onboarding(poolHandle, "university", universityWallet, universityDid, "bob", null, bobWalletConfig, bobWalletCredentials);
+    
+        
+    
+        console.log("\"university\" -> Create \"Transcript\" Credential Offer for bob");
+        let universitytranscriptCredDefJson = await indy.issuerCreateCredentialOffer(universityWallet, universityTranscriptCredDefId);
+    
+        console.log("\"university\" -> Get key for bob did");
+        let bobuniversityVerkey = await indy.keyForDid(poolHandle, universityWallet, universitybobConnectionResponse['did']);
+    
+        console.log("\"university\" -> Authcrypt \"transcript\" Credential Offer for bob");
+        let authcryptedtranscriptCredOffer = await indy.cryptoAuthCrypt(universityWallet, universitybobKey, bobuniversityVerkey, Buffer.from(JSON.stringify(universitytranscriptCredDefJson),'utf8'));
+    
+        console.log("\"university\" -> Send authcrypted \"transcript\" Credential Offer to bob");
+    
+        console.log("\"bob\" -> Authdecrypted \"transcript\" Credential Offer from university");
+        let [universitybobVerkey, authdecrypteduniversitytranscriptCredDefJson, authdecryptedtranscriptCredOffer] = await authDecrypt(bobWallet, bobuniversityKey, authcryptedtranscriptCredOffer);
+    
+        console.log("\"bob\" -> Create and store \"bob\" Master Secret in Wallet");
+        let bobMasterSecretId = await indy.proverCreateMasterSecret(bobWallet, null);
+    
+        console.log("\"bob\" -> Get \"university transcript\" Credential Definition from Ledger");
+        let universitytranscriptCredDef;
+        [universityTranscriptCredDefId, universitytranscriptCredDef] = await getCredDef(poolHandle, bobuniversityDid, authdecryptedtranscriptCredOffer['cred_def_id']);
+    
+        console.log("\"bob\" -> Create \"transcript\" Credential Request for university");
+        let [transcriptCredRequestjson, transcriptCredRequestMetadataJson] = await indy.proverCreateCredentialReq(bobWallet, bobuniversityDid, authdecrypteduniversitytranscriptCredDefJson, universitytranscriptCredDef, bobMasterSecretId);
+    
+        console.log("\"bob\" -> Authcrypt \"transcript\" Credential Request for university");
+        let authcryptedtranscriptCredRequest = await indy.cryptoAuthCrypt(bobWallet, bobuniversityKey, universitybobVerkey, Buffer.from(JSON.stringify(transcriptCredRequestjson),'utf8'));
+    
+        console.log("\"bob\" -> Send authcrypted \"transcript\" Credential Request to university");
+    
+        console.log("\"university\" -> Authdecrypt \"transcript\" Credential Request from bob");
+        let authdecryptedtranscriptCredRequestjson;
+        [bobuniversityVerkey, authdecryptedtranscriptCredRequestjson] = await authDecrypt(universityWallet, universitybobKey, authcryptedtranscriptCredRequest);
+    
+        console.log("\"university\" -> Create \"transcript\" Credential for bob");
+        // note that encoding is not standardized by Indy except that 32-bit integers are encoded as themselves. IS-786
+
+
+        // ['first_name', 'last_name', 'degree', 'status',
+        // 'year', 'average', 'uid', 'university_name', 'grant_status' ]);
+
+        // Note : value of University should be derived from wallet
+        let transcriptCredValues = {
+            "first_name": {"raw": "Bob", "encoded": "1139481716457488690172217916278103335"},
+            "last_name": {"raw": "Murray", "encoded": "5321642780241790123587902456789123452"},
+            "degree": {"raw": "Bachelore of Technology ", "encoded": "12434523576212321"},
+            "status": {"raw": "graduate", "encoded": "2213454313412354"},           
+            "year": {"raw": "2019", "encoded": "2019"},
+            "average": {"raw": "84", "encoded": "84"},
+            "uid": {"raw": "Uni123456", "encoded": "5321642780241790123587902456789123452435"},
+            "university_name": {"raw": "UniversityX", "encoded": "124345235762123214534"},
+            "grant_status": {"raw": "approved", "encoded": "221345431341235432490"},   
+        };
+    
+        let [transcriptCredJson] = await indy.issuerCreateCredential(universityWallet, universitytranscriptCredDefJson, authdecryptedtranscriptCredRequestjson, transcriptCredValues, null, -1);
+    
+        console.log("\"university\" -> Authcrypt \"transcript\" Credential for bob");
+        let authcryptedtranscriptCredJson = await indy.cryptoAuthCrypt(universityWallet, universitybobKey, bobuniversityVerkey, Buffer.from(JSON.stringify(transcriptCredJson),'utf8'));
+    
+        console.log("\"university\" -> Send authcrypted \"transcript\" Credential to bob");
+    
+        console.log("\"bob\" -> Authdecrypted \"transcript\" Credential from university");
+        let [, authdecryptedtranscriptCredJson] = await authDecrypt(bobWallet, bobuniversityKey, authcryptedtranscriptCredJson);
+    
+        console.log("\"bob\" -> Store \"transcript\" Credential from university");
+        await indy.proverStoreCredential(bobWallet, null, transcriptCredRequestMetadataJson,
+            authdecryptedtranscriptCredJson, universitytranscriptCredDef, null);
+
+            await indy.closeWallet(universityWallet);    
+            response.send({status:200, msg:authdecryptedtranscriptCredJson});
+    }
+
+});
+
+// Get Schema by schema ID
+
+app.get("/api/v1/getSchema", function(req, response) {
+    run();
+    async function run(){
+   let [, enrollementCertificateSchema] = await getSchema(poolHandle, notaryDid,enrollementCertificateSchemaId );
+
+   let [, transcriptSchema] = await getSchema(poolHandle, notaryDid,transcriptSchemaId );
+
+   console.log('===========schema for enrollement, transcript', enrollementCertificateSchema, transcriptSchema )
+response.send({status:200, enrollementCertificateSchema, transcriptSchema})
+}
+});
+
+// ----------------->Demo to check async await <-------------------------
+
+// app.get("/api/v1/demo", function(req, response) {
+
+//     run();
+
+   
+// });
+
+// async function run(){
+//     console.log('Hi');
+// }
+
+// =======================================Helper function ===========================================================
+
+async function onboarding(poolHandle, From, fromWallet, fromDid, to, toWallet, toWalletConfig, toWalletCredentials) {
+    console.log(`\"${From}\" > Create and store in Wallet \"${From} ${to}\" DID`);
+    let [fromToDid, fromToKey] = await indy.createAndStoreMyDid(fromWallet, {});
+
+    console.log(`\"${From}\" > Send Nym to Ledger for \"${From} ${to}\" DID`);
+    await sendNym(poolHandle, fromWallet, fromDid, fromToDid, fromToKey, null);
+
+    console.log(`\"${From}\" > Send connection request to ${to} with \"${From} ${to}\" DID and nonce`);
+    let connectionRequest = {
+        did: fromToDid,
+        nonce: 123456789
+    };
+
+    if (!toWallet) {
+        console.log(`\"${to}\" > Create wallet"`);
+        try {
+            await indy.createWallet(toWalletConfig, toWalletCredentials)
+        } catch(e) {
+            if(e.message !== "WalletAlreadyExistsError") {
+                throw e;
+            }
+        }
+        toWallet = await indy.openWallet(toWalletConfig, toWalletCredentials);
+    }
+
+    console.log(`\"${to}\" > Create and store in Wallet \"${to} ${From}\" DID`);
+    let [toFromDid, toFromKey] = await indy.createAndStoreMyDid(toWallet, {});
+
+    console.log(`\"${to}\" > Get key for did from \"${From}\" connection request`);
+    let fromToVerkey = await indy.keyForDid(poolHandle, toWallet, connectionRequest.did);
+
+    console.log(`\"${to}\" > Anoncrypt connection response for \"${From}\" with \"${to} ${From}\" DID, verkey and nonce`);
+    let connectionResponse = JSON.stringify({
+        'did': toFromDid,
+        'verkey': toFromKey,
+        'nonce': connectionRequest['nonce']
+    });
+    let anoncryptedConnectionResponse = await indy.cryptoAnonCrypt(fromToVerkey, Buffer.from(connectionResponse, 'utf8'));
+
+    console.log(`\"${to}\" > Send anoncrypted connection response to \"${From}\"`);
+
+    console.log(`\"${From}\" > Anondecrypt connection response from \"${to}\"`);
+    let decryptedConnectionResponse = JSON.parse(Buffer.from(await indy.cryptoAnonDecrypt(fromWallet, fromToKey, anoncryptedConnectionResponse)));
+
+    console.log(`\"${From}\" > Authenticates \"${to}\" by comparision of Nonce`);
+    if (connectionRequest['nonce'] !== decryptedConnectionResponse['nonce']) {
+        throw Error("nonces don't match!");
+    }
+
+    console.log(`\"${From}\" > Send Nym to Ledger for \"${to} ${From}\" DID`);
+    await sendNym(poolHandle, fromWallet, fromDid, decryptedConnectionResponse['did'], decryptedConnectionResponse['verkey'], null);
+
+    return [toWallet, fromToKey, toFromDid, toFromKey, decryptedConnectionResponse];
+}
+
+async function getVerinym(poolHandle, From, fromWallet, fromDid, fromToKey, to, toWallet, toFromDid, toFromKey, role) {
+    console.log(`\"${to}\" > Create and store in Wallet \"${to}\" new DID"`);
+    let [toDid, toKey] = await indy.createAndStoreMyDid(toWallet, {});
+
+    console.log(`\"${to}\" > Authcrypt \"${to} DID info\" for \"${From}\"`);
+    let didInfoJson = JSON.stringify({
+        'did': toDid,
+        'verkey': toKey
+    });
+    let authcryptedDidInfo = await indy.cryptoAuthCrypt(toWallet, toFromKey, fromToKey, Buffer.from(didInfoJson, 'utf8'));
+
+    console.log(`\"${to}\" > Send authcrypted \"${to} DID info\" to ${From}`);
+
+    console.log(`\"${From}\" > Authdecrypted \"${to} DID info\" from ${to}`);
+    let [senderVerkey, authdecryptedDidInfo] =
+        await indy.cryptoAuthDecrypt(fromWallet, fromToKey, Buffer.from(authcryptedDidInfo));
+
+    let authdecryptedDidInfoJson = JSON.parse(Buffer.from(authdecryptedDidInfo));
+    console.log(`\"${From}\" > Authenticate ${to} by comparision of Verkeys`);
+    let retrievedVerkey = await indy.keyForDid(poolHandle, fromWallet, toFromDid);
+    if (senderVerkey !== retrievedVerkey) {
+        throw Error("Verkey is not the same");
+    }
+
+    console.log(`\"${From}\" > Send Nym to Ledger for \"${to} DID\" with ${role} Role`);
+    await sendNym(poolHandle, fromWallet, fromDid, authdecryptedDidInfoJson['did'], authdecryptedDidInfoJson['verkey'], role);
+
+    return toDid
+}
+
+async function sendNym(poolHandle, walletHandle, Did, newDid, newKey, role) {
+    let nymRequest = await indy.buildNymRequest(Did, newDid, newKey, null, role);
+    await indy.signAndSubmitRequest(poolHandle, walletHandle, Did, nymRequest);
+}
+
+async function sendSchema(poolHandle, walletHandle, Did, schema) {
+    // schema = JSON.stringify(schema); // FIXME: Check JSON parsing
+    let schemaRequest = await indy.buildSchemaRequest(Did, schema);
+    await indy.signAndSubmitRequest(poolHandle, walletHandle, Did, schemaRequest)
+}
+
+async function sendCredDef(poolHandle, walletHandle, did, credDef) {
+    let credDefRequest = await indy.buildCredDefRequest(did, credDef);
+    await indy.signAndSubmitRequest(poolHandle, walletHandle, did, credDefRequest);
+}
+
+async function getSchema(poolHandle, did, schemaId) {
+    let getSchemaRequest = await indy.buildGetSchemaRequest(did, schemaId);
+    let getSchemaResponse = await indy.submitRequest(poolHandle, getSchemaRequest);
+    return await indy.parseGetSchemaResponse(getSchemaResponse);
+}
+
+async function getCredDef(poolHandle, did, schemaId) {
+    let getCredDefRequest = await indy.buildGetCredDefRequest(did, schemaId);
+    let getCredDefResponse = await indy.submitRequest(poolHandle, getCredDefRequest);
+    return await indy.parseGetCredDefResponse(getCredDefResponse);
+}
+
+async function proverGetEntitiesFromLedger(poolHandle, did, identifiers, actor) {
+    let schemas = {};
+    let credDefs = {};
+    let revStates = {};
+
+    for(let referent of Object.keys(identifiers)) {
+        let item = identifiers[referent];
+        console.log(`\"${actor}\" -> Get Schema from Ledger`);
+        let [receivedSchemaId, receivedSchema] = await getSchema(poolHandle, did, item['schema_id']);
+        schemas[receivedSchemaId] = receivedSchema;
+
+        console.log(`\"${actor}\" -> Get Claim Definition from Ledger`);
+        let [receivedCredDefId, receivedCredDef] = await getCredDef(poolHandle, did, item['cred_def_id']);
+        credDefs[receivedCredDefId] = receivedCredDef;
+
+        if (item.rev_reg_seq_no) {
+            // TODO Create Revocation States
+        }
+    }
+
+    return [schemas, credDefs, revStates];
+}
+
+
+async function verifierGetEntitiesFromLedger(poolHandle, did, identifiers, actor) {
+    let schemas = {};
+    let credDefs = {};
+    let revRegDefs = {};
+    let revRegs = {};
+
+    for(let referent of Object.keys(identifiers)) {
+        let item = identifiers[referent];
+        console.log(`"${actor}" -> Get Schema from Ledger`);
+        let [receivedSchemaId, receivedSchema] = await getSchema(poolHandle, did, item['schema_id']);
+        schemas[receivedSchemaId] = receivedSchema;
+
+        console.log(`"${actor}" -> Get Claim Definition from Ledger`);
+        let [receivedCredDefId, receivedCredDef] = await getCredDef(poolHandle, did, item['cred_def_id']);
+        credDefs[receivedCredDefId] = receivedCredDef;
+
+        if (item.rev_reg_seq_no) {
+            // TODO Get Revocation Definitions and Revocation Registries
+        }
+    }
+
+    return [schemas, credDefs, revRegDefs, revRegs];
+}
+
+async function authDecrypt(walletHandle, key, message) {
+    let [fromVerkey, decryptedMessageJsonBuffer] = await indy.cryptoAuthDecrypt(walletHandle, key, message);
+    let decryptedMessage = JSON.parse(decryptedMessageJsonBuffer);
+    let decryptedMessageJson = JSON.stringify(decryptedMessage);
+    return [fromVerkey, decryptedMessageJson, decryptedMessage];
+}
+
+
+// if (require.main.filename == __filename) {
+//     run()
+// }
+
+// module.exports = {
+//     run
+// }
